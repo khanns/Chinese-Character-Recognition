@@ -1,3 +1,5 @@
+# -*- coding: utf-8 -*-
+
 # top 1 accuracy 0.9249791286257038 top k accuracy 0.9747623788455786
 import os
 import random
@@ -9,7 +11,10 @@ import tensorflow as tf
 import pickle
 from PIL import Image
 from tensorflow.python.ops import control_flow_ops
-
+import sys
+import importlib    # for python3.6
+importlib.reload(sys)
+# sys.setdefaultencoding('utf-8')
 
 logger = logging.getLogger('Training a chinese write char recognition')
 logger.setLevel(logging.INFO)
@@ -35,12 +40,12 @@ tf.app.flags.DEFINE_string('train_data_dir', '../data/train/', 'the train datase
 tf.app.flags.DEFINE_string('test_data_dir', '../data/test/', 'the test dataset dir')
 tf.app.flags.DEFINE_string('log_dir', './log', 'the logging dir')
 
-tf.app.flags.DEFINE_boolean('restore', False, 'whether to restore from checkpoint')
+tf.app.flags.DEFINE_boolean('restore', True, 'whether to restore from checkpoint')
 tf.app.flags.DEFINE_boolean('epoch', 1, 'Number of epoches')
-tf.app.flags.DEFINE_boolean('batch_size', 128, 'Validation batch size')
+tf.app.flags.DEFINE_integer('batch_size', 128, 'Validation batch size')
 tf.app.flags.DEFINE_string('mode', 'validation', 'Running mode. One of {"train", "valid", "test"}')
 
-gpu_options = tf.GPUOptions(per_process_gpu_memory_fraction=0.333)
+gpu_options = tf.GPUOptions(per_process_gpu_memory_fraction=0.7)
 FLAGS = tf.app.flags.FLAGS
 
 
@@ -54,7 +59,7 @@ class DataIterator:
             if root < truncate_path:
                 self.image_names += [os.path.join(root, file_path) for file_path in file_list]
         random.shuffle(self.image_names)
-        self.labels = [int(file_name[len(data_dir):].split(os.sep)[0]) for file_name in self.image_names]
+        self.labels = [np.int64(file_name[len(data_dir):].split(os.sep)[0]) for file_name in self.image_names]
 
     @property
     def size(self):
@@ -115,20 +120,26 @@ def build_graph(top_k):
         loss = tf.reduce_mean(tf.nn.sparse_softmax_cross_entropy_with_logits(logits=logits, labels=labels))
         accuracy = tf.reduce_mean(tf.cast(tf.equal(tf.argmax(logits, 1), labels), tf.float32))
 
-        update_ops = tf.get_collection(tf.GraphKeys.UPDATE_OPS)
-        if update_ops:
-            updates = tf.group(*update_ops)
-            loss = control_flow_ops.with_dependencies([updates], loss)
+        # update_ops = tf.get_collection(tf.GraphKeys.UPDATE_OPS)
+        # if update_ops:
+        #    updates = tf.group(*update_ops)
+        #    loss = control_flow_ops.with_dependencies([updates], loss)
 
         global_step = tf.get_variable("step", [], initializer=tf.constant_initializer(0.0), trainable=False)
         optimizer = tf.train.AdamOptimizer(learning_rate=0.1)
-        train_op = slim.learning.create_train_op(loss, optimizer, global_step=global_step)
+        # train_op = slim.learning.create_train_op(loss, optimizer, global_step=global_step)
+
+        update_ops = tf.get_collection(tf.GraphKeys.UPDATE_OPS)
+        with tf.control_dependencies (update_ops):
+            train_op = optimizer.minimize (loss, global_step=global_step)
+
         probabilities = tf.nn.softmax(logits)
 
         tf.summary.scalar('loss', loss)
         tf.summary.scalar('accuracy', accuracy)
         merged_summary_op = tf.summary.merge_all()
-        predicted_val_top_k, predicted_index_top_k = tf.nn.top_k(probabilities, k=top_k)
+
+        predicted_val_top_k, predicted_index_top_k = tf.nn.top_k(probabilities, k=top_k, name='op_topK')
         accuracy_in_top_k = tf.reduce_mean(tf.cast(tf.nn.in_top_k(probabilities, labels, top_k), tf.float32))
 
     return {'images': images,
@@ -224,7 +235,7 @@ def validation():
     final_predict_index = []
     groundtruth = []
 
-    with tf.Session() as sess:
+    with tf.Session(config=tf.ConfigProto(gpu_options=gpu_options,allow_soft_placement=True)) as sess:
         test_images, test_labels = test_feeder.input_pipeline(batch_size=FLAGS.batch_size, num_epochs=1)
         graph = build_graph(top_k=3)
         saver = tf.train.Saver()
@@ -283,7 +294,7 @@ def inference(image):
     temp_image = temp_image.resize((FLAGS.image_size, FLAGS.image_size), Image.ANTIALIAS)
     temp_image = np.asarray(temp_image) / 255.0
     temp_image = temp_image.reshape([-1, 64, 64, 1])
-    with tf.Session() as sess:
+    with tf.Session(config=tf.ConfigProto(gpu_options=gpu_options,allow_soft_placement=True)) as sess:
         logger.info('========start inference============')
         # images = tf.placeholder(dtype=tf.float32, shape=[None, 64, 64, 1])
         # Pass a shadow label 0. This label will not affect the computation graph.
